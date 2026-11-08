@@ -7,6 +7,8 @@ from aiogram.types import (
     PreCheckoutQuery,
     BufferedInputFile,
     InputMediaPhoto,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 
 from .dialog import (
@@ -70,7 +72,7 @@ def _get_user_platform(user_id: int) -> str:
 
 
 def _ensure_user_games(user_id: int) -> list[dict]:
-    """Гарантирует наличие списка тренировочных партий даже после перезапуска бота в PyCharm."""
+    """Гарантирует наличие списка тренировочных партий даже после перезапуска бота."""
     games = user_active_puzzles.get(user_id)
     if not games:
         last_report = None
@@ -157,7 +159,6 @@ async def cb_start_scout(callback: CallbackQuery, state: FSMContext):
 async def process_username(message: Message, state: FSMContext, bot: Bot):
     username = (message.text or "").strip()
 
-    # Если игрок отправил команду (/train, /start и т.д.) во время ожидания ника — не ищем ее как никнейм!
     if username.startswith("/") or username.lower() in {"тренажер", "тренировка", "train"}:
         await state.clear()
         if username.lower().startswith("/train") or username.lower() in {"тренажер", "тренировка", "train"}:
@@ -195,7 +196,6 @@ async def process_username(message: Message, state: FSMContext, bot: Bot):
     cache_key = f"{user_id}:{platform}:{username.lower()}"
     cached_reports[cache_key] = report
 
-    # Сразу подготавливаем персональные тренировочные партии под этого игрока
     user_active_puzzles[user_id] = get_training_puzzles_for_report(report)
 
     profile = get_user(user_id)
@@ -386,7 +386,6 @@ async def cb_puzzle_theme(callback: CallbackQuery, state: FSMContext):
 async def cb_puzzle_answer(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     parts = callback.data.split(":")
-    # Поддержка нового формата pz_ans:game_idx:step_idx:opt_idx и старого pz_ans:step_idx:opt_idx
     if len(parts) == 4:
         _, game_str, step_str, opt_str = parts
         game_idx = int(game_str)
@@ -409,7 +408,6 @@ async def cb_puzzle_answer(callback: CallbackQuery, state: FSMContext):
     is_correct = opt_idx == step["correct_index"]
 
     if not is_correct:
-        # Игрок попался в ловушку — объясняем опровержение и даем переходить прямо на этой доске!
         await callback.answer(
             f"❌ Ловушка! Ход {chosen_move} ведет к потере: {step['refutation_short']}. Выбери другой ход!",
             show_alert=True,
@@ -431,7 +429,6 @@ async def cb_puzzle_answer(callback: CallbackQuery, state: FSMContext):
             pass
         return
 
-    # Правильный ход! Если в тренировочной партии есть следующий ход — двигаем фигуры и делаем ответ бота
     if step_idx + 1 < len(steps):
         await callback.answer(f"✅ Отличный ход {chosen_move}! Соперник отвечает на доске...")
         await _send_or_update_game_step(
@@ -443,7 +440,6 @@ async def cb_puzzle_answer(callback: CallbackQuery, state: FSMContext):
         )
         return
 
-    # Финальный ход партии сделан верно — показываем итоговую выигранную позицию на доске!
     await callback.answer("🏆 Победа в тренировочной партии!")
     win_caption = (
         f"🏆 <b>Тренировочная партия #{game_idx + 1} выиграна!</b>\n"
@@ -495,7 +491,58 @@ async def cb_puzzle_next(callback: CallbackQuery, state: FSMContext):
     )
 
 
-# ================= ОПЛАТА TELEGRAM STARS =================
+# ================= ОПЛАТА TELEGRAM STARS И ПОДПИСКИ (500 / 1500) =================
+@handlers_router.callback_query(F.data == "sub_menu")
+async def cb_sub_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text = (
+        "💎 <b>Подписки и PRO-тарифы Chess Scout Bot</b>\n\n"
+        f"• 🔓 <b>Разовый разбор соперника:</b> <b>{SCOUT_PRICE_STARS} ⭐️</b> (1 полное досье дебютных дыр)\n\n"
+        "• 🔥 <b>Подписка «PRO Игрок» — 500 ⭐️</b>\n"
+        "  Начисляет <b>+35 полных PRO-разборов</b> любых соперников на Chess.com и Lichess (экономия 30%!)\n\n"
+        "• 👑 <b>Подписка «VIP Тренер / Безлимит ∞» — 1500 ⭐️</b>\n"
+        "  Открывает <b>ВЕЧНЫЙ БЕЗЛИМИТНЫЙ ДОСТУП ∞</b> ко всем секретным планам, дебютным уязвимостям и тренировочным партиям для тебя и твоих учеников!"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 Купить «PRO Игрок» за 500 ⭐️ (+35 разборов)", callback_data="buy_sub:500")],
+        [InlineKeyboardButton(text="👑 Купить «VIP Безлимит ∞» за 1500 ⭐️", callback_data="buy_sub:1500")],
+        [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_main_menu")],
+    ])
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@handlers_router.callback_query(F.data == "back_main_menu")
+async def cb_back_main_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("🏠 <b>Главное меню:</b> выбери действие ниже:", parse_mode="HTML", reply_markup=main_menu_kb())
+    await callback.answer()
+
+
+@handlers_router.callback_query(F.data.startswith("buy_sub:"))
+async def send_subscription_invoice(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    tier = int(callback.data.split(":", 1)[1])
+    if tier == 500:
+        title = "Подписка PRO Игрок (+35 полных разборов)"
+        desc = "Пакет из 35 полных PRO-досье дебютных уязвимостей соперников на Chess.com и Lichess."
+        label = "Подписка PRO (35 разборов)"
+    else:
+        tier = 1500
+        title = "Подписка VIP Тренер (Полный Безлимит ∞)"
+        desc = "Безлимитный VIP-доступ ко всем PRO-досье соперников и дебютным тренажерам без ограничений!"
+        label = "VIP Безлимит ∞"
+
+    await callback.message.answer_invoice(
+        title=title,
+        description=desc,
+        payload=f"sub_pack:{tier}",
+        currency="XTR",
+        prices=[LabeledPrice(label=label, amount=tier)],
+    )
+    await callback.answer()
+
+
 @handlers_router.callback_query(F.data.startswith("buy_scout:"))
 async def send_stars_invoice(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -520,11 +567,34 @@ async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment_handler(message: Message):
     payload = message.successful_payment.invoice_payload
     stars_paid = message.successful_payment.total_amount
-    record_stars_purchase(message.from_user.id, stars_paid)
+    uid = message.from_user.id
+    record_stars_purchase(uid, stars_paid)
+
+    if payload.startswith("sub_pack:"):
+        tier = int(payload.split(":", 1)[1])
+        if tier >= 1500:
+            from database import set_user_admin
+            set_user_admin(uid, True)
+            await message.answer(
+                "👑 <b>Поздравляем! Подписка «VIP Безлимит ∞» (1500 ⭐️) активирована!</b>\n\n"
+                "Теперь все полные PRO-досье соперников и тренировочные партии доступны тебе <b>БЕСПЛАТНО и без ограничений!</b>",
+                parse_mode="HTML",
+                reply_markup=main_menu_kb(),
+            )
+        else:
+            add_free_unlocks(uid, 35)
+            profile = get_user(uid)
+            await message.answer(
+                f"🔥 <b>Поздравляем! Подписка «PRO Игрок» (500 ⭐️) активирована!</b>\n\n"
+                f"Тебе начислено <b>+35 полных PRO-разборов</b> (всего доступно на балансе: <b>{profile['free_unlocks']}</b>)!",
+                parse_mode="HTML",
+                reply_markup=main_menu_kb(),
+            )
+        return
 
     _, platform, username_lower = payload.split(":", 2)
-    user_active_platform[message.from_user.id] = platform
-    cache_key = f"{message.from_user.id}:{platform}:{username_lower}"
+    user_active_platform[uid] = platform
+    cache_key = f"{uid}:{platform}:{username_lower}"
     report = cached_reports.get(cache_key)
 
     if not report:
